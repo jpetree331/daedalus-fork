@@ -207,6 +207,93 @@ def test_uploads_carry_the_token_in_a_header_and_never_in_a_link(_tmp):
     assert all(click['href'].startswith('blob:') for click in saved), seen
 
 
+_EVAL_HARNESS = _dashnode.DashboardNodeHarness(_DOM + r"""
+(async () => {
+let tabs = [];
+const puts = [];
+const listeners = [];
+const bus = { on: (fn) => listeners.push(fn) };
+globalThis.fetch = async (target, init) => {
+  const options = init || {};
+  const where = String(target);
+  if (options.method === 'PUT') {
+    puts.push(JSON.parse(options.body));
+    return jsonResponse({ ok: true, did: 'delivery' });
+  }
+  if (where.startsWith('/tabs')) return jsonResponse(tabs);
+  if (where.includes('consume=1')) {
+    return jsonResponse({ consumed: true, resultGeneration: 'gen' });
+  }
+  if (where.startsWith('/result')) {
+    return jsonResponse({
+      id: puts[puts.length - 1].id, deliveryId: 'delivery',
+      resultGeneration: 'gen', result: 'ran', world: 'page',
+    });
+  }
+  throw new Error('unexpected fetch ' + where);
+};
+phase('dashboard module import started');
+const { mount } = await bounded(
+  import(pathToFileURL(process.argv[1]).href),
+  'dashboard module import', _dashnodeStepTimeoutMs,
+);
+phase('dashboard module imported');
+phase('dashboard call started');
+const container = new El('div');
+mount(container, bus);
+await bounded(settle(), 'eval tab selector render', _dashnodeStepTimeoutMs);
+const sel = container.find('[data-role=tab-select]');
+const runBtn = container.find('[data-role=run]');
+const metaEl = container.find('[data-role=meta]');
+const untargeted = container.all().find(
+  (el) => el.tag === 'button' && el !== runBtn
+    && el.dataset.role !== 'clear-history');
+container.find('[data-role=code]').value = 'document.title';
+runBtn.click();
+await bounded(settle(), 'run with no target', _dashnodeStepTimeoutMs);
+const refused = {
+  selected: sel.value, puts: puts.length, status: metaEl.textContent,
+};
+untargeted.click();
+await bounded(settle(), 'run in the active tab', _dashnodeStepTimeoutMs);
+const activeTab = {
+  puts: puts.length, tab: puts.length ? puts[puts.length - 1].tab : null,
+  label: untargeted.textContent, title: untargeted.attrs.title || '',
+};
+tabs = [{ tabId: '11', title: 'first' }];
+for (const fn of listeners) fn({ type: 'tabs-synced' });
+await bounded(settle(), 'tab sync refresh', _dashnodeStepTimeoutMs);
+sel.value = '11';
+runBtn.click();
+await bounded(settle(), 'run against a chosen tab', _dashnodeStepTimeoutMs);
+const targeted = {
+  puts: puts.length, tab: puts.length ? puts[puts.length - 1].tab : null,
+};
+phase('dashboard call settled');
+process.stdout.write(JSON.stringify({ refused, activeTab, targeted }));
+phase('dashboard harness finished');
+})().catch(leave);
+""", bounded_steps=6, module=True, arguments=(
+    ROOT / 'dashboard' / 'sections' / 'eval.js',))
+
+
+def test_run_refuses_an_empty_target_and_names_where_untargeted_code_runs(
+        _tmp):
+    """An empty selection is not a target; only the explicit button sends
+    none, and it says the code runs in the browser's active tab."""
+    result = _dashnode.run_dashboard_node(_EVAL_HARNESS)
+    seen = json.loads(result.stdout)
+    assert seen['refused']['selected'] == '', seen
+    assert seen['refused']['puts'] == 0, seen
+    assert seen['refused']['status'].strip(), seen
+    assert seen['activeTab']['puts'] == 1, seen
+    assert seen['activeTab']['tab'] == '', seen
+    for text in (seen['activeTab']['label'], seen['activeTab']['title']):
+        assert 'active tab' in text.lower(), seen
+        assert 'all tabs' not in text.lower(), seen
+    assert seen['targeted'] == {'puts': 2, 'tab': '11'}, seen
+
+
 def main():
     return _util.runner(_util.collect(globals()), tmp_prefix='dashsections_')
 

@@ -16,6 +16,11 @@ def _load_queue(name):
         _util.ROOT / 'daedalus_bridge' / 'command_queue.py', name=name)
 
 
+def _load_service(name):
+    return _util.load(
+        _util.ROOT / 'daedalus_bridge' / 'stream_service.py', name=name)
+
+
 def test_command_queue_imports_without_daedalus_configuration(_tmp):
     env = {key: value for key, value in os.environ.items()
            if not key.startswith('DAEDALUS_') and key != 'TOKEN'}
@@ -104,6 +109,38 @@ def test_notify_dashboard_publishes_an_event_and_wakes_the_token(tmp):
     assert json.loads(published.read_text(encoding='utf-8')) == {
         'id': published.stem, 'kind': 'event', 'type': 'tabs-synced'}
     assert queue.event('tok').is_set()
+
+
+def test_notify_dashboard_delivers_non_ascii_titles_through_the_drain(tmp):
+    """A dashboard event must reach the drain whatever its title contains.
+
+    The drain decodes every entry as UTF-8, so an event written in the
+    locale code page is undecodable on Windows: `café` was left in place
+    and re-read every tick until the TTL sweep, and an emoji failed inside
+    the write after a zero-byte file already existed. Both lost the event.
+    """
+    queue = _load_queue('command_queue_dashboard_notify_utf8')
+    service = _load_service('stream_service_dashboard_notify_utf8')
+    cmd_dir = Path(tmp) / 'commands'
+    dash_dir = cmd_dir / 'tok_dashboard'
+    for title in ('café', 'tab 🚀'):
+        queue.notify_dashboard(
+            cmd_dir, 'tok', {'type': 'tab-registered', 'title': title})
+        names = sorted(path.name for path in dash_dir.iterdir())
+        assert len(names) == 1 and names[0].endswith('.json'), names
+        published = dash_dir / names[0]
+        raw = published.read_bytes()
+        assert raw, f'zero-byte event for {title!r}'
+        assert json.loads(raw.decode('utf-8'))['title'] == title, raw
+        frames = []
+        delivered = service.drain_queue(
+            dash_dir, None, None, command_ttl=100,
+            frame_writer=frames.append)
+        assert delivered == 1, (title, delivered)
+        assert frames == [{
+            'id': published.stem, 'kind': 'event',
+            'type': 'tab-registered', 'title': title}], frames
+        assert not list(dash_dir.iterdir()), list(dash_dir.iterdir())
 
 
 def test_next_seq_is_lexically_increasing_and_well_formed(_tmp):

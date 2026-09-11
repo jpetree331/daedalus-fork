@@ -232,27 +232,48 @@ def delete_upload(upload_dir, body):
     return 200, {'ok': True}
 
 
-def named_upload(upload_dir, token, named):
-    """Serve exactly the file a result named, not whatever is newest.
+def _format_of(path):
+    """The suffix a stored file's type is decided by, case folded."""
+    return path.suffix.lstrip('.').lower()
 
-    `named` is the `path` POST /upload answered with and the result
-    carries, token component included. Screenshot ids are reused — `_ss`
-    is the default one — so an id identifies a directory rather than a
-    capture, and the newest file in it belongs to whichever invocation
-    finished last. Every component is checked the way each was checked
-    on the way in, and the leading one has to be the caller's own token:
-    one token's paths never name another's storage.
+
+def named_file(upload_dir, token, named, missing='file not found'):
+    """GET /upload?token=X&path=P — serve exactly the stored file P names.
+
+    `named` is the `path` POST /upload answered with and the listing
+    carries, token component included. Every component is checked the way
+    each was checked on the way in, and the leading one has to be the
+    caller's own token: one token's paths never name another's storage.
+    The type comes from the suffix, and a suffix the table does not know
+    is served as bytes rather than refused: this is the route a browser
+    downloads any upload by, with the credential in a header, so that no
+    link on the dashboard has to carry the token.
     """
     parts = named.split('/')
     if any(path_safety.unsafe_component(part) for part in parts):
         return 400, {'error': 'invalid path component'}
     if parts[0] != token:
-        return 404, {'error': 'no screenshot'}
+        return 404, {'error': missing}
     target = upload_dir.joinpath(*parts)
-    fmt = target.suffix.lstrip('.').lower()
-    if fmt not in SCREENSHOT_TYPES or not target.is_file():
+    if not target.is_file():
+        return 404, {'error': missing}
+    return FileAnswer(target, screenshot_mime(_format_of(target)))
+
+
+def named_upload(upload_dir, token, named):
+    """Serve exactly the screenshot a result named, not whatever is newest.
+
+    Screenshot ids are reused — `_ss` is the default one — so an id
+    identifies a directory rather than a capture, and the newest file in
+    it belongs to whichever invocation finished last. The path is resolved
+    as any stored file is; only a screenshot type is answered here.
+    """
+    answer = named_file(upload_dir, token, named, missing='no screenshot')
+    if not isinstance(answer, FileAnswer):
+        return answer
+    if _format_of(answer.path) not in SCREENSHOT_TYPES:
         return 404, {'error': 'no screenshot'}
-    return FileAnswer(target, screenshot_mime(fmt))
+    return answer
 
 
 def latest_screenshot(upload_dir, token, params):
@@ -274,10 +295,9 @@ def latest_screenshot(upload_dir, token, params):
         if not d.is_dir():
             continue
         for f in d.iterdir():
-            if f.suffix.lower().lstrip('.') in SCREENSHOT_TYPES:
+            if _format_of(f) in SCREENSHOT_TYPES:
                 if not latest or f.stat().st_mtime > latest.stat().st_mtime:
                     latest = f
     if not latest:
         return 404, {'error': 'no screenshot'}
-    fmt = latest.suffix.lstrip('.').lower()
-    return FileAnswer(latest, screenshot_mime(fmt))
+    return FileAnswer(latest, screenshot_mime(_format_of(latest)))

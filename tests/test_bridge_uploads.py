@@ -10,6 +10,7 @@ import base64
 import http.client
 import json
 import os
+import urllib.error
 import urllib.parse
 import urllib.request
 import sys
@@ -526,6 +527,74 @@ def test_result_upload_delete_filesystem_errors_are_answered(tmp):
         assert status == 200 and health['ok'] is True, (status, health)
         assert statuses == [500, 500, 500], statuses
         assert delete_dir.is_dir() and (delete_dir / 'kept.bin').is_file()
+
+
+def _fetch(url, headers):
+    """One GET, returning (status, body bytes, Content-Type)."""
+    request = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(request, timeout=10) as reply:
+            return (reply.status, reply.read(),
+                    reply.headers.get('Content-Type'))
+    except urllib.error.HTTPError as refusal:
+        return (refusal.code, refusal.read(),
+                refusal.headers.get('Content-Type'))
+
+
+def test_an_upload_path_serves_that_file_to_a_header_credential(tmp):
+    """`GET /upload?path=P` is how a browser downloads what it listed.
+
+    The dashboard wrote every download link as `/uploads/<path>`, a route
+    the bridge has never had: each click answered 404, and because the
+    listed path begins with the token, each one also wrote the credential
+    into browser history and the proxy access log that the header-only
+    carriage everywhere else exists to keep it out of. The route serves
+    exactly the listed file, typed by its suffix, to the token that owns
+    it, checked component by component the way /screenshot checks a path.
+    """
+    with _util.bridge(tmp) as (base, docroot):
+        text = b'plain words'
+        files = (('note.txt', text, 'text/plain'),
+                 ('shot.png', PNG, 'image/png'),
+                 ('blob.bin', b'\x00\x01', 'application/octet-stream'))
+        for name, payload, _mime in files:
+            status, body = _util.post_json(base + '/upload', {
+                'token': TOK, 'id': 'dl', 'filename': name,
+                'data': base64.b64encode(payload).decode()})
+            assert status == 200, (name, status, body)
+        bearer = {'Authorization': f'Bearer {TOK}'}
+        for name, payload, mime in files:
+            query = urllib.parse.urlencode({'path': f'{TOK}/dl/{name}'})
+            status, served, content_type = _fetch(
+                f'{base}/upload?{query}', bearer)
+            assert (status, served) == (200, payload), (
+                name, status, served[:64])
+            assert content_type == mime, (name, content_type)
+
+        # `path` wins over the listing parameters beside it.
+        query = urllib.parse.urlencode(
+            {'path': f'{TOK}/dl/note.txt', 'id': 'dl', 'limit': 1})
+        status, served, content_type = _fetch(
+            f'{base}/upload?{query}', bearer)
+        assert (status, served, content_type) == (
+            200, text, 'text/plain'), (status, served[:64], content_type)
+
+        # Another token's namespace, a traversal and an absent file are
+        # refused the way /screenshot refuses them.
+        theirs = docroot / 'uploads' / 'othertok' / 'dl'
+        theirs.mkdir(parents=True)
+        (theirs / 'note.txt').write_bytes(b'theirs')
+        for path, expected in (
+                ('othertok/dl/note.txt', 404),
+                (f'{TOK}/../othertok/dl/note.txt', 400),
+                (f'{TOK}/dl/absent.txt', 404)):
+            query = urllib.parse.urlencode({'path': path})
+            status, body, _ = _fetch(f'{base}/upload?{query}', bearer)
+            assert status == expected, (path, status, body[:120])
+
+        # Without a path the same route still lists.
+        status, body = _util.get_json(base + f'/upload?token={TOK}&id=dl')
+        assert status == 200 and len(body) == 3, (status, body)
 
 
 def main():

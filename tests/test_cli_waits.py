@@ -78,6 +78,31 @@ def _answer_eval(base, docroot, argv, env, tab, result):
     return proc.returncode, out, err
 
 
+def _answer_ext(base, docroot, argv, env, result):
+    """Run one typed subcommand and answer the command it enqueues.
+
+    Returns (returncode, stdout, stderr, the payload the bridge received).
+    """
+    qdir = Path(docroot) / 'commands' / f'{TOK}_extension'
+    survivors = clear_command_queue(qdir)
+    proc = subprocess.Popen(
+        CLI + argv, cwd=str(_util.ROOT), env=env,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, encoding='utf-8')
+    try:
+        queued = queued_command(
+            qdir, f'the command {argv[0]} enqueues', exclude=survivors)
+        status, _ = _util.post_json(base + '/result', {
+            'token': TOK, 'tabId': 'extension', 'id': queued['id'],
+            'result': result, 'error': None, 'ts': 1,
+            '_did': queued['_did']})
+        assert status == 200, status
+        out, err = proc.communicate(timeout=60)
+    finally:
+        _drain.kill_and_drain(proc)
+    return proc.returncode, out, err, queued
+
+
 def test_a_zero_timeout_on_exec_and_put_reads_as_the_default(tmp):
     """`-t 0` waits the documented default; it does not time out at once.
 
@@ -102,6 +127,34 @@ def test_a_zero_timeout_on_exec_and_put_reads_as_the_default(tmp):
             assert 'Timeout' not in err, (argv, err)
             assert any(f'{m} {argv[1]}' in out for m in IN_MARKS), (argv, out)
             assert 'Zero Title' in out, (argv, out)
+
+
+def test_store_hotfix_sends_permanent_only_when_it_was_asked_for(tmp):
+    """Re-storing a hotfix without --permanent keeps its stored flag.
+
+    The extension preserves an existing fix's flag only when the command
+    carries no `permanent` field at all. The CLI sent `args.permanent`,
+    which argparse always makes a bool, so every update of a permanent
+    hotfix that did not restate --permanent silently demoted it to
+    version-gated.
+    """
+    with _util.bridge(tmp) as (base, docroot):
+        env = cli_env(DAEDALUS_URL=base, DAEDALUS_TOKEN=TOK)
+        stored = {'stored': 'fx', 'total': 1, 'permanent': True}
+        code, out, err, queued = _answer_ext(
+            base, docroot, ['store-hotfix', 'fx', '--code', '1'], env,
+            stored)
+        assert code == 0, (code, out, err)
+        assert queued['type'] == 'store-hotfix', queued
+        assert queued['fixId'] == 'fx' and queued['code'] == '1', queued
+        assert 'permanent' not in queued, queued
+        assert '[PERM]' in out, out
+        code, out, err, queued = _answer_ext(
+            base, docroot,
+            ['store-hotfix', 'fx', '--code', '1', '--permanent'], env,
+            stored)
+        assert code == 0, (code, out, err)
+        assert queued.get('permanent') is True, queued
 
 
 if __name__ == '__main__':

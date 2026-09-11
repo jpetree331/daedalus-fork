@@ -29,12 +29,25 @@ def rpc(client, session_id, method, params=None):
     r = client.post(URL, json=payload, headers=headers)
     r.raise_for_status()
     sid = r.headers.get('Mcp-Session-Id', session_id)
+    # A notification has no id to answer, so the transport acknowledges it
+    # with 202 and nothing else. Reading that nothing as JSON is a traceback
+    # before the first tool is listed.
+    if r.status_code == 202 or not r.content.strip():
+        return None, sid
     ct = r.headers.get('content-type', '')
     if 'text/event-stream' in ct:
         for line in r.text.splitlines():
             if line.startswith('data: '):
                 return json.loads(line[6:]), sid
     return r.json(), sid
+
+
+def answer(client, session_id, method, params=None):
+    """rpc() for a request, whose answer must carry a body."""
+    data, sid = rpc(client, session_id, method, params)
+    if data is None:
+        sys.exit(f'{method}: the server answered with no body')
+    return data, sid
 
 
 def main():
@@ -47,13 +60,14 @@ def main():
         })
         rpc(c, sid, 'notifications/initialized')
         if action == 'list':
-            data, _ = rpc(c, sid, 'tools/list')
+            data, _ = answer(c, sid, 'tools/list')
             for t in data.get('result', {}).get('tools', []):
                 print(f'{t["name"]:30}  {t.get("description", "")[:80]}')
         elif action == 'call':
             tool = sys.argv[2]
             args = json.loads(sys.argv[3]) if len(sys.argv) > 3 else {}
-            data, _ = rpc(c, sid, 'tools/call', {'name': tool, 'arguments': args})
+            data, _ = answer(
+                c, sid, 'tools/call', {'name': tool, 'arguments': args})
             print(json.dumps(data.get('result', data), indent=2, ensure_ascii=False))
         else:
             sys.exit(f'unknown action: {action}')
